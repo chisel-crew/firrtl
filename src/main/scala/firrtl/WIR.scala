@@ -190,6 +190,7 @@ private[firrtl] object InfoExpr {
     case InfoExpr(i, e) => (i, e)
     case other          => (NoInfo, other)
   }
+  def orElse(info: Info, alt: => Info): Info = if (info == NoInfo) alt else info
 }
 
 object WrappedExpression {

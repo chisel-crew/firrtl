@@ -14,6 +14,7 @@ import firrtl.graph.DiGraph
 import firrtl.analyses.InstanceGraph
 import firrtl.annotations.TargetToken.Ref
 import firrtl.options.Dependency
+import firrtl.InfoExpr.{unwrap, orElse}
 
 import annotation.tailrec
 import collection.mutable
@@ -475,7 +476,7 @@ class ConstantPropagation extends Transform with DependencyAPIMigration with Res
       case p: DoPrim => constPropPrim(p)
       case m: Mux => constPropMux(m)
       case ref @ WRef(rname, _,_, SourceFlow) if nodeMap.contains(rname) =>
-        constPropNodeRef(ref, nodeMap(rname))
+        constPropNodeRef(ref, unwrap(nodeMap(rname))._2)
       case ref @ WSubField(WRef(inst, _, InstanceKind, _), pname, _, SourceFlow) =>
         val module = instMap(inst.Instance)
         // Check constSubOutputs to see if the submodule is driving a constant
@@ -577,7 +578,7 @@ class ConstantPropagation extends Transform with DependencyAPIMigration with Res
     }
 
     // When propagating a reference, check if we want to keep the name that would be deleted
-    def propagateRef(lname: String, value: Expression): Unit = {
+    def propagateRef(lname: String, value: Expression, info: Info): Unit = {
       value match {
         case WRef(rname,_,kind,_) if betterName(lname, rname) && !swapMap.contains(rname) && kind != PortKind =>
           assert(!swapMap.contains(lname)) // <- Shouldn't be possible because lname is either a
@@ -585,19 +586,21 @@ class ConstantPropagation extends Transform with DependencyAPIMigration with Res
           swapMap += (lname -> rname, rname -> lname)
         case _ =>
       }
-      nodeMap(lname) = value
+      val valuex = if (info == NoInfo) value else InfoExpr(info, value)
+      nodeMap(lname) = valuex
     }
 
     def constPropStmt(s: Statement): Statement = {
       val stmtx = s map constPropStmt map constPropExpression(nodeMap, instMap, constSubOutputs)
       // Record things that should be propagated
       stmtx match {
-        case x: DefNode if !dontTouches.contains(x.name) => propagateRef(x.name, x.value)
+        case DefNode(info, name, value) if !dontTouches.contains(name) =>
+          propagateRef(name, value, info)
         case reg: DefRegister if reg.reset.tpe == AsyncResetType =>
           asyncResetRegs(reg.name) = reg
-        case Connect(_, WRef(wname, wtpe, WireKind, _), expr: Literal) if !dontTouches.contains(wname) =>
+        case Connect(info, WRef(wname, wtpe, WireKind, _), expr: Literal) if !dontTouches.contains(wname) =>
           val exprx = constPropExpression(nodeMap, instMap, constSubOutputs)(pad(expr, wtpe))
-          propagateRef(wname, exprx)
+          propagateRef(wname, exprx, info)
         // Record constants driving outputs
         case Connect(_, WRef(pname, ptpe, PortKind, _), lit: Literal) if !dontTouches.contains(pname) =>
           val paddedLit = constPropExpression(nodeMap, instMap, constSubOutputs)(pad(lit, ptpe)).asInstanceOf[Literal]
@@ -676,8 +679,10 @@ class ConstantPropagation extends Transform with DependencyAPIMigration with Res
       // Actually transform some statements
       stmtx match {
         // Propagate connections to references
-        case Connect(info, lhs, rref @ WRef(rname, _, NodeKind, _)) if !dontTouches.contains(rname) =>
-          Connect(info, lhs, nodeMap(rname))
+        case Connect(info0, lhs, rref @ WRef(rname, _, NodeKind, _)) if !dontTouches.contains(rname) =>
+          val (info1, value) = unwrap(nodeMap(rname))
+          // TODO what is the best way to combine here?
+          Connect(orElse(info0, info1), lhs, value)
         // If an Attach has at least 1 port, any wires are redundant and can be removed
         case Attach(info, exprs) if exprs.exists(kind(_) == PortKind) =>
           Attach(info, exprs.filterNot(kind(_) == WireKind))
